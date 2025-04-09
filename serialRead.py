@@ -1,75 +1,105 @@
 import socket
 import struct
+import threading
 import time
 import logging
+from datetime import datetime
 
 # Configuration
-SERVER_IP = '0.0.0.0'  # Listen on all network interfaces
+SERVER_IP = '0.0.0.0'
 SERVER_PORT = 8888
-BUFFER_SIZE = 100 * 6  # 10 samples per batch, 6 bytes per sample
+BUFFER_SIZE = 100 * 6  # 100 samples * 6 bytes (X, Y, Z each 2 bytes)
 SCALING_FACTOR = 1
-DATA_POINTS = []
+RUN_DURATION = 10  # seconds – change this to modify how long the server runs
 
-# Logging Configuration
+# Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+shutdown_flag = threading.Event()
+client_threads = []
+lock = threading.Lock()
 
 
-def start_server():
-    """Starts a TCP server to receive ADXL345 data from ESP8266."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.bind((SERVER_IP, SERVER_PORT))
-        server.listen(1)
-        logging.info(f"Server listening on {SERVER_IP}:{SERVER_PORT}")
-        conn, addr = server.accept()
-        with conn:
-            logging.info(f"Connected by {addr}")
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536) #set socket receive buffer to 64KB.
-            receive_data(conn)
+def handle_client(conn, addr, duration=30):
+    """Handles individual client connection."""
+    # duration = RUN_DURATION
 
-
-def receive_data(conn):
-    """Receives and processes batched data from ESP8266."""
+    # logging.info(f"New connection from {addr}")
+    conn.settimeout(1)
     start_time = time.time()
-    conn.settimeout(1) #set socket timeout to 1 second.
-    while time.time() - start_time < 30:
-        try:
-            data = b'' #Initialize as byte string.
-            while len(data) < BUFFER_SIZE:
+    buffer = b""
+
+    timestamp = datetime.now().strftime("%m%d_%H%M%S")
+    last_octet = addr[0].split('.')[-1]
+    file_path = f"data_red_{last_octet}_{timestamp}.txt"
+
+    try:
+        with open(file_path, "w") as f:
+            while time.time() - start_time < duration:
                 try:
-                    more_data = conn.recv(BUFFER_SIZE - len(data))
+                    more_data = conn.recv(BUFFER_SIZE - len(buffer))
                     if not more_data:
-                        logging.warning("Connection closed unexpectedly.")
-                        return # Exit the function
-                    data += more_data
+                        break
+                    buffer += more_data
+
+                    while len(buffer) >= 6:
+                        chunk = buffer[:6]
+                        buffer = buffer[6:]
+                        raw_X, raw_Y, raw_Z = struct.unpack('<hhh', chunk)
+                        X, Y, Z = raw_X, raw_Y, raw_Z
+                        f.write(f"{X},{Y},{Z}\n")
                 except socket.timeout:
-                    logging.warning("Socket timeout, waiting for more data.")
-                    break # continue to the next loop iteration.
-            if len(data) != BUFFER_SIZE:
-                logging.warning("Incomplete batch received")
+                    continue
+    except Exception as e:
+        logging.error(f"Client {addr} error: {e}")
+    finally:
+        conn.close()
+        logging.info(f"Connection with {addr} closed.")
+
+
+
+def start_server(duration=30):
+    """Start the multi-client TCP server and collect data for a limited time."""
+    global RUN_DURATION
+    RUN_DURATION = duration
+
+    # data_store = []
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((SERVER_IP, SERVER_PORT))
+    server.listen(5)
+    server.settimeout(1)
+
+    logging.info(f"Server listening on {SERVER_IP}:{SERVER_PORT}")
+    start_time = time.time()
+
+    try:
+        while time.time() - start_time < RUN_DURATION:
+            try:
+                conn, addr = server.accept()
+                logging.info(f"New connection from {addr}")
+                thread = threading.Thread(target=handle_client, args=(conn, addr, RUN_DURATION))
+                thread.start()
+                client_threads.append(thread)
+            except socket.timeout:
                 continue
+    finally:
+        shutdown_flag.set()
+        server.close()
+        logging.info("Server shutdown initiated. Waiting for threads to finish...")
 
-            for i in range(0, BUFFER_SIZE, 6):
-                raw_X, raw_Y, raw_Z = struct.unpack('<hhh', data[i:i+6])
-                X = raw_X / SCALING_FACTOR
-                Y = raw_Y / SCALING_FACTOR
-                Z = raw_Z / SCALING_FACTOR
-                DATA_POINTS.append((X, Y, Z))
-        except (socket.error, struct.error) as e:
-            logging.error(f"Data reception error: {e}")
-            break
+        for t in client_threads:
+            t.join()
 
-    logging.info(f"Data collection complete: {len(DATA_POINTS)} samples received")
-    save_data()
+        # save_data(data_store)
 
 
-def save_data():
-    """Saves collected data to a file."""
-    filename = "adxl345_data.txt"
-    with open(filename, "w") as f:
-        for X, Y, Z in DATA_POINTS:
-            f.write(f"{X},{Y},{Z}\n")
-    logging.info(f"Data saved to {filename}")
+# def save_data(data):
+#     """Save collected accelerometer data to file."""
+#     filename = "adxl345_data.txt"
+#     with open(filename, "w") as f:
+#         for x, y, z in data:
+#             f.write(f"{x},{y},{z}\n")
+#     logging.info(f"Saved {len(data)} samples to {filename}")
 
 
 if __name__ == "__main__":
-    start_server()
+    start_server(duration=30)  # You can change this value or pass it in dynamically
