@@ -10,21 +10,8 @@
 #define OFSY 0x1F // Y-axis offset
 #define OFSZ 0x20 // Z-axis offset
 
-// Wi-Fi Credentials
-// const char* ssid = "ChienJu";
-// const char* password = "jyd726489";
-// const char* server_ip = "172.17.95.176"; // Change to your server's IP
-
-// const char* ssid = "61-4f";
-// const char* password = "Qq0981673893";
-// const char* server_ip = "192.168.68.54"; // Change to your server's IP
-
-const char* ssid = "Alchoholic_2G";
-const char* password = "aSej29)siE%q";
-const char* server_ip = "192.168.50.80"; // Change to your server's IP
-
-
-const uint16_t server_port = 8888;
+// Define Wi-Fi and server credentials (moved to a separate configuration)
+#include "wifi_config.h" // Assuming wifi_config.h contains ssid, password, server_ip, server_port
 
 WiFiClient client;
 
@@ -81,12 +68,12 @@ void readAllData(byte startReg, byte *buffer, int numBytes) {
  * Connects to Wi-Fi and TCP server.
  */
 void connectToServer() {
-    WiFi.begin(ssid, password);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     while (WiFi.status() != WL_CONNECTED) {
       // Serial.println("Lost WiFi Connection...");
       delay(500);
     }
-    while (!client.connect(server_ip, server_port)) {
+    while (!client.connect(SERVER_IP, SERVER_PORT)) {
       // Serial.println("Lost server Connection...");
       delay(1000);
     }
@@ -94,6 +81,8 @@ void connectToServer() {
 
 void setup() {
     Serial.begin(1000000);
+    Serial.setDebugOutput(true);
+
     SPI.begin();
     pinMode(CS_PIN, OUTPUT);
     digitalWrite(CS_PIN, HIGH);
@@ -116,6 +105,7 @@ int sampleCount = 0;
 void loop() {
     unsigned long current = micros();
 
+    // Serial.println(WiFi.localIP());
     if (current - previous >= interval) {
         previous = current;
         readAllData(0x32, &buffer[int(sampleCount) * 6], 6);
@@ -123,8 +113,8 @@ void loop() {
         if (sampleCount >= SAMPLE_BATCH_SIZE) {
           if (client.connected()) {
               client.write(buffer, sizeof(buffer));
-              // Serial.print("RSSI: ");
-              // Serial.println(WiFi.RSSI()); //print rssi value.
+            //   Serial.print("RSSI: ");
+            //   Serial.println(WiFi.RSSI()); //print rssi value.
           } else {
               client.stop();
               connectToServer();

@@ -10,7 +10,7 @@ SERVER_IP = '0.0.0.0'
 SERVER_PORT = 8888
 BUFFER_SIZE = 100 * 6  # 100 samples * 6 bytes (X, Y, Z each 2 bytes)
 SCALING_FACTOR = 1
-RUN_DURATION = 10  # seconds – change this to modify how long the server runs
+RUN_DURATION = 30  # seconds – change this to modify how long the server runs
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,9 +28,9 @@ def handle_client(conn, addr, duration=30):
     start_time = time.time()
     buffer = b""
 
-    timestamp = datetime.now().strftime("%m%d_%H%M%S")
+    # timestamp = datetime.now().strftime("%m%d_%H%M%S")
     last_octet = addr[0].split('.')[-1]
-    file_path = f"data_red_{last_octet}_{timestamp}.txt"
+    file_path = f"263_1_{last_octet}.txt"
 
     try:
         with open(file_path, "w") as f:

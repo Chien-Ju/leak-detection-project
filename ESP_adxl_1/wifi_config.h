@@ -1,18 +1,24 @@
 #ifndef WIFI_CONFIG_H
 #define WIFI_CONFIG_H
 
-// #define WIFI_SSID       "ChienJu"
-// #define WIFI_PASSWORD   "jyd726489"
-// #define SERVER_IP       "172.17.95.176"
+// #define WIFI_SSID       "NTUR101A"
+// #define WIFI_PASSWORD   "hecaslab"
+// #define SERVER_IP       "192.168.11.43"
 
-#define WIFI_SSID       "61-4f"
-#define WIFI_PASSWORD   "Qq0981673893"
-#define SERVER_IP       "192.168.68.54"
+struct WiFiCredential {
+    const char* ssid;
+    const char* password;
+    const char* server_ip;
+    uint16_t server_port;
+};
 
-// #define WIFI_SSID       "Alchoholic_2G"
-// #define WIFI_PASSWORD   "aSej29)siE%q"
-// #define SERVER_IP       "192.168.50.80"
+// List of known Wi-Fi networks
+const WiFiCredential knownNetworks[] = {
+    {"ChienJu", "jyd726489", "172.17.95.176", 8888},
+    {"61-4f", "Qq0981673893", "192.168.68.54", 8888},
+    {"Alchoholic_2G", "aSej29)siE%q", "192.168.50.80", 8888},
+};
 
-#define SERVER_PORT     8888
+const int knownNetworkCount = sizeof(knownNetworks) / sizeof(knownNetworks[0]);
 
 #endif
