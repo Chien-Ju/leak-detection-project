@@ -18,7 +18,8 @@ WiFiClient client;
 const WiFiCredential* currentNetwork = nullptr;
 
 const int SAMPLE_BATCH_SIZE = 100;
-uint8_t buffer[SAMPLE_BATCH_SIZE * 6];
+const int SAMPLE_SIZE = 10; // 6 bytes for XYZ + 4 bytes for timestamp
+uint8_t buffer[SAMPLE_BATCH_SIZE * SAMPLE_SIZE];
 bool startSignalReceived = false;
 
 void writeRegister(byte reg, byte value) {
@@ -132,12 +133,6 @@ void setup() {
   pinMode(CS_PIN, OUTPUT);
   digitalWrite(CS_PIN, HIGH);
 
-  // float battery = getBatteryVoltage();
-  // Serial.print("Battery Voltage: ");
-  // Serial.print(battery);
-  // Serial.println(" V");
-  // delay(2000);
-
   WiFi.mode(WIFI_STA);
   connectToServer();
 
@@ -166,17 +161,16 @@ void loop() {
   }
 
   if (current - startMicros >= RUN_DURATION * 1000000UL) {
-      Serial.printf("Run complete. Samples collected: %d\n", sampleCount);
-      
-      if (sampleCount > 0) {
-          client.write(buffer, sampleCount * 6);
-          Serial.printf("Sent final partial batch of %d samples.\n", sampleCount);
-      }
+    Serial.printf("Run complete. Samples collected: %d\n", sampleCount);
 
-      client.stop();
-      ESP.restart();
+    if (sampleCount > 0) {
+      client.write(buffer, sampleCount * SAMPLE_SIZE);
+      Serial.printf("Sent final partial batch of %d samples.\n", sampleCount);
+    }
+
+    client.stop();
+    ESP.restart();
   }
-
 
   if (!client.connected()) {
     Serial.println("Disconnected from server. Attempting to reconnect...");
@@ -190,11 +184,16 @@ void loop() {
 
   if (current - previous >= interval) {
     previous = current;
-    readAllData(0x32, &buffer[sampleCount * 6], 6);
+
+    int offset = sampleCount * SAMPLE_SIZE;
+    readAllData(0x32, &buffer[offset], 6);
+    unsigned long timestamp = current - startMicros;
+    memcpy(&buffer[offset + 6], &timestamp, 4);
+
     sampleCount++;
 
     if (sampleCount >= SAMPLE_BATCH_SIZE) {
-      Serial.printf("Sending %d bytes to server...\n", sizeof(buffer));
+      // Serial.printf("Sending %d bytes to server...\n", sizeof(buffer));
       client.write(buffer, sizeof(buffer));
       sampleCount = 0;
     }

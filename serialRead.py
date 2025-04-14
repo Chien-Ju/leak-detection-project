@@ -14,12 +14,15 @@ from typing import Tuple
 # Configuration
 SERVER_IP = '0.0.0.0'
 SERVER_PORT = 8888
-BUFFER_SIZE = 100 * 6
+SAMPLE_SIZE = 10  # 6 bytes (XYZ) + 4 bytes (timestamp)
+SAMPLE_BATCH_SIZE = 100
+BUFFER_SIZE = SAMPLE_SIZE * SAMPLE_BATCH_SIZE
 SYNC_DELAY = 2  # Seconds to wait before sending start command
 RUN_DURATION = 30  # Seconds to collect data after sync
 EXPECTED_CLIENTS = 2
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 def handle_client(conn: socket.socket, addr: Tuple[str, int], start_time: float, duration: int):
     conn.settimeout(1)
@@ -30,7 +33,7 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int], start_time: float,
     try:
         with open(file_path, "w") as f:
             while time.time() < start_time:
-                time.sleep(0.01)  # wait until collection begins
+                time.sleep(0.01)
 
             while time.time() - start_time < duration:
                 try:
@@ -40,12 +43,11 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int], start_time: float,
                         break
                     buffer += data
 
-                    # Extract 6-byte samples
-                    while len(buffer) >= 6:
-                        chunk = buffer[:6]
-                        buffer = buffer[6:]
-                        x, y, z = struct.unpack('<hhh', chunk)
-                        f.write(f"{x},{y},{z}\n")
+                    while len(buffer) >= SAMPLE_SIZE:
+                        chunk = buffer[:SAMPLE_SIZE]
+                        buffer = buffer[SAMPLE_SIZE:]
+                        x, y, z, timestamp = struct.unpack('<hhhI', chunk)
+                        f.write(f"{x},{y},{z},{timestamp}\n")
                 except socket.timeout:
                     continue
     except Exception as e:
@@ -53,6 +55,7 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int], start_time: float,
     finally:
         conn.close()
         logging.info(f"Connection with {addr} closed.")
+
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -98,6 +101,7 @@ def start_server():
         time.sleep(1)
         server.close()
         logging.info("Server shut down.")
+
 
 if __name__ == "__main__":
     start_server()
