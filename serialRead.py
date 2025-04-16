@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 def handle_client(conn: socket.socket, addr: Tuple[str, int], start_time: float, duration: int):
     conn.settimeout(1)
     buffer = b""
-    file_path = f"263_1_{addr[0].split('.')[-1]}.txt"
+    file_path = f"50_5_{addr[0].split('.')[-1]}.txt"
     logging.info(f"Saving data to {file_path}")
 
     try:
