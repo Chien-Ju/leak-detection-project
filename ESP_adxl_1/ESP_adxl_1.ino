@@ -14,9 +14,9 @@
 #include "wifi_config.h"
 
 // Static IP configuration
-IPAddress static_ip(192, 168, 11, 193);
-IPAddress gateway(192, 168, 11, 1);
-IPAddress subnet(255, 255, 255, 0);
+// IPAddress static_ip(192, 168, 11, 193);
+// IPAddress gateway(192, 168, 11, 1);
+// IPAddress subnet(255, 255, 255, 0);
 
 WiFiClient client;
 const WiFiCredential* currentNetwork = nullptr;
@@ -71,7 +71,7 @@ bool connectToWiFi() {
     for (int j = 0; j < n; j++) {
       if (WiFi.SSID(j) == knownNetworks[i].ssid) {
         Serial.printf("Connecting to: %s\n", knownNetworks[i].ssid);
-        WiFi.config(static_ip, gateway, subnet);
+        // WiFi.config(static_ip, gateway, subnet);
         WiFi.begin(knownNetworks[i].ssid, knownNetworks[i].password);
 
         unsigned long wifiStart = millis();
@@ -154,7 +154,7 @@ void setupADXL345() {
 }
 
 void setup() {
-  Serial.begin(1000000);
+  Serial.begin(115200);
   Serial.println("Setup starting...");
   delay(1000);
   Serial.setDebugOutput(false);
