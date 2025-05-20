@@ -8,16 +8,17 @@
 struct WiFiCredential {
     const char* ssid;
     const char* password;
-    const char* server_ip;
-    uint16_t server_port;
+    IPAddress server_ip;
+    uint16_t tcp_port;
+    uint16_t http_port;
 };
 
 // List of known Wi-Fi networks
 const WiFiCredential knownNetworks[] = {
-    {"ChienJu", "jyd726489", "172.17.95.176", 8888},
-    {"61-4f", "Qq0981673893", "192.168.68.51", 8888},
-    {"Alchoholic_2G", "aSej29)siE%q", "192.168.50.80", 8888},
-    {"NTUR101A", "hecaslab", "192.168.11.43", 8888},
+    {"ChienJu", "jyd726489", {172,17,95,176}, 5001, 5000},
+    {"61-4f", "Qq0981673893", {192,168,68,54}, 5001, 5000},
+    {"Alchoholic_2G", "aSej29)siE%q", {192,168,50,80}, 5001, 5000},
+    {"NTUR101A", "hecaslab", {192,168,11,43}, 5001, 5000}
 };
 
 const int knownNetworkCount = sizeof(knownNetworks) / sizeof(knownNetworks[0]);

@@ -1,45 +1,42 @@
-#include <SPI.h>
-#include <ESP8266WiFi.h>
+#include <WiFi.h>
 #include <WiFiClient.h>
+#include <HTTPClient.h>
+#include <SPI.h>
+#include "wifi_config.h"
 
 #define CS_PIN 15
 #define POWER_CTL 0x2D
 #define DATA_FORMAT 0x31
 #define BW_RATE 0x2C
-#define OFSX 0x1E
-#define OFSY 0x1F
-#define OFSZ 0x20
+#define DEVID 0x00
 
-#define TOTAL_SAMPLES 96000 // 3200 Hz * 30s
-#define SAMPLES_PER_SEGMENT 2500 // Standard segment
-#define FINAL_SEGMENT_SAMPLES 1000 // Last segment for exact 96000
-#define TOTAL_SEGMENTS 39 // 38*2500 + 1*1000 = 96000
-
-#include "wifi_config.h"
+#define SAMPLE_SIZE 10
+#define RUN_DURATION 30
+#define TARGET_SAMPLES (3200 * RUN_DURATION)
+#define TCP_PORT 5001
+#define HTTP_PORT 5000
 
 // Static IP configuration
 // IPAddress static_ip(192, 168, 11, 193);
 // IPAddress gateway(192, 168, 11, 1);
 // IPAddress subnet(255, 255, 255, 0);
 
-WiFiClient client;
+uint8_t* dataBuffer = nullptr;
+volatile uint32_t writeIndex = 0;
+volatile bool samplingDone = false;
+uint32_t start_time = 0; 
+
+WiFiClient tcpClient;
+WiFiClient httpClient;
+HTTPClient http;
+
+hw_timer_t* timer = nullptr;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
 const WiFiCredential* currentNetwork = nullptr;
 
-const int SAMPLE_SIZE = 10; // 6 bytes XYZ + 4 bytes timestamp
-const int MAX_SAMPLES = 2500; // ~1.56s at 3200 Hz (50 KB)
-const int BATCH_SIZE = 200; // Send 100 samples per batch
-uint8_t buffer[MAX_SAMPLES * SAMPLE_SIZE];
-volatile bool startSignalReceived = false;
-int sampleCount = 0;
-bool dataCollected = false;
-long totalSamplesSent = 0;
-int segmentCount = 0;
-unsigned long startMicrosGlobal = 0; // Global timestamp reference
-
-// bool wifiConnected = false;
-// bool serverConnected = false;
-
-void writeRegister(byte reg, byte value) {
+// ------------------- SPI Communication ------------------- //
+void writeRegister(uint8_t reg, uint8_t value) {
   SPI.beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE3));
   digitalWrite(CS_PIN, LOW);
   SPI.transfer(reg);
@@ -51,320 +48,275 @@ void writeRegister(byte reg, byte value) {
 uint8_t readRegister(uint8_t reg) {
   SPI.beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE3));
   digitalWrite(CS_PIN, LOW);
-  SPI.transfer(reg | 0x80);  // Read flag
+  SPI.transfer(reg | 0x80);
   uint8_t value = SPI.transfer(0x00);
   digitalWrite(CS_PIN, HIGH);
   SPI.endTransaction();
   return value;
 }
 
-void readAllData(byte startReg, byte *buffer, int numBytes) {
-    if (!buffer) {
-        Serial.println("Error: Null buffer in readAllData");
-        return;
-    }
-    SPI.beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE3));
-    digitalWrite(CS_PIN, LOW);
-    SPI.transfer(startReg | 0x80 | 0x40);
-    for (int i = 0; i < numBytes; i++) {
-        buffer[i] = SPI.transfer(0x00);
-    }
-    digitalWrite(CS_PIN, HIGH);
-    SPI.endTransaction();
-}
-
-bool connectToWiFi() {
-    Serial.println("Scanning for Wi-Fi networks...");
-    int n = WiFi.scanNetworks();
-    if (n == 0) {
-      Serial.println("No networks found.");
-      return false;
-    }
-  
-    for (int i = 0; i < knownNetworkCount; i++) {
-      for (int j = 0; j < n; j++) {
-        if (WiFi.SSID(j) == knownNetworks[i].ssid) {
-          Serial.printf("Connecting to: %s\n", knownNetworks[i].ssid);
-          // WiFi.config(static_ip, gateway, subnet);
-          WiFi.begin(knownNetworks[i].ssid, knownNetworks[i].password);
-  
-          unsigned long wifiStart = millis();
-          while (WiFi.status() != WL_CONNECTED) {
-            delay(500);
-            yield();
-            Serial.print(".");
-            if (millis() - wifiStart > 15000) {
-              Serial.println("\nWi-Fi connection timed out.");
-              return false;
-            }
-          }
-  
-          Serial.println("\nConnected to Wi-Fi!");
-          Serial.print("IP address: ");
-          Serial.println(WiFi.localIP());
-          currentNetwork = &knownNetworks[i];
-          return true;
-        }
-      }
-    }
-  
-    Serial.println("No known Wi-Fi networks found nearby.");
-    return false;
-  }
-
-bool connectToServer() {
-    if (!currentNetwork || !currentNetwork->server_ip) {
-        Serial.println("Error: Invalid server configuration");
-        return false;
-    }
-
-    Serial.print("Connecting to server: ");
-    Serial.println(currentNetwork->server_ip);
-    unsigned long start = millis();
-    while (!client.connect(currentNetwork->server_ip, currentNetwork->server_port)) {
-        Serial.println("Retrying server...");
-        delay(500);
-        if (millis() - start > 10000) {
-            Serial.println("Server connection timeout");
-            return false;
-        }
-    }
-    Serial.println("Connected to server!");
-    Serial.print("Free heap: ");
-    Serial.println(ESP.getFreeHeap());
-    return true;
-}
-
-bool waitForStartSignal(unsigned long timeoutMillis = 15000) {
-    char incomingBuffer[32];
-    int bufferIndex = 0;
-    unsigned long start = millis();
-
-    Serial.println("Waiting for CMD:START");
-    while (!startSignalReceived && (millis() - start < timeoutMillis)) {
-        if (!client.connected()) {
-            Serial.println("Server connection lost");
-            return false;
-        }
-        while (client.available()) {
-            char c = client.read();
-            if (bufferIndex < sizeof(incomingBuffer) - 1) {
-                incomingBuffer[bufferIndex++] = c;
-            }
-            if (c == '\n') {
-                incomingBuffer[bufferIndex] = '\0';
-                if (strncmp(incomingBuffer, "CMD:START:", 10) == 0) {
-                    unsigned long delayMs = atol(incomingBuffer + 10);
-                    Serial.print("Received CMD:START with delay: ");
-                    Serial.println(delayMs);
-                    delay(delayMs);
-                    startSignalReceived = true;
-                    Serial.println("Starting data collection");
-                    return true;
-                }
-                bufferIndex = 0;
-            }
-        }
-    }
-    Serial.println("Timeout waiting for CMD:START");
-    return false;
+void readXYZ(uint8_t* buf) {
+  SPI.beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE3));
+  digitalWrite(CS_PIN, LOW);
+  SPI.transfer(0x32 | 0xC0); // Burst read from 0x32
+  for (int i = 0; i < 6; i++) buf[i] = SPI.transfer(0x00);
+  digitalWrite(CS_PIN, HIGH);
+  SPI.endTransaction();
 }
 
 void setupADXL345() {
-    Serial.println("Initializing ADXL345...");
-    writeRegister(POWER_CTL, 0x00); // Reset
-    delay(10);
-    writeRegister(DATA_FORMAT, 0x08); // Full-resolution, ±2g
-    writeRegister(BW_RATE, 0x0F); // 3200 Hz
-    writeRegister(OFSX, 0);
-    writeRegister(OFSY, -3);
-    writeRegister(OFSZ, -6);
-    writeRegister(POWER_CTL, 0x08); // Measurement mode
-    delay(10);
-    uint8_t devid = readRegister(0x00);
-    Serial.print("ADXL345 DEVID: ");
-    Serial.println(devid, HEX); // Expect 0xE5
-    if (devid != 0xE5) {
-        Serial.println("Error: ADXL345 not detected");
-    }
+  writeRegister(POWER_CTL, 0x08);      // Enable measurement
+  writeRegister(DATA_FORMAT, 0x08);    // Full resolution, ±2g
+  writeRegister(BW_RATE, 0x0F);        // 3200 Hz output rate
+  Serial.print("ADXL345 DEVID: ");
+  Serial.println(readRegister(DEVID), HEX);
 }
 
-void setup() {
-    Serial.begin(115200);
-    Serial.println("Booting ESP8266");
+// ------------------- Sampling Timer ------------------- //
+// Timer ISR for sampling
+void IRAM_ATTR onSampleTimer() {
+  portENTER_CRITICAL_ISR(&timerMux);
+
+  uint32_t timestamp = micros() - start_time; // Get the current timestamp
+  uint8_t* ptr = dataBuffer + (writeIndex * SAMPLE_SIZE);
+  // uint32_t timestampUs = timerRead(timer); // 2 MHz = 0.5 µs per tick
+  readXYZ(ptr);
+  memcpy(ptr + 6, &timestamp, 4);
+  
+  writeIndex++;
+  if (writeIndex >= TARGET_SAMPLES) {
+    samplingDone = true;
+    timerStop(timer);
+    timerDetachInterrupt(timer); // Detach to prevent stray interrupts
+    portEXIT_CRITICAL_ISR(&timerMux);
+    return;
+  }
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+void startSampling() {
+  Serial.println("Starting sampling...");
+  writeIndex = 0;
+  samplingDone = false;
+
+  timerRestart(timer); // Restart the timer
+  timerWrite(timer, 0);  // reset counter
+  timerAlarm(timer, 625, true, 0);  // 3200 Hz ≈ 312.5 µs interval
+  start_time = micros();
+  timerStart(timer);
+}
+
+// ------------------- Wi-Fi and TCP ------------------- //
+bool connectToWiFi() {
+  Serial.println("Scanning for Wi-Fi networks...");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+
+  // Wait for any ongoing scan to complete
+  while (WiFi.scanComplete() == -1) {
+    Serial.println("Waiting for previous scan to complete...");
     delay(1000);
-    Serial.setDebugOutput(false);
+  }
 
-    pinMode(CS_PIN, OUTPUT);
-    digitalWrite(CS_PIN, HIGH);
-    SPI.begin();
+  int n = WiFi.scanNetworks();
+  delay(200);
+  Serial.printf("WiFi.scanNetworks() returned %d\n", n);
+  if (n == WIFI_SCAN_FAILED) {
+    Serial.println("Scan failed with error code -2");
+    return false;
+  }
+  if (n == WIFI_SCAN_RUNNING) {
+    Serial.println("Scan is still running, please wait...");
+    delay(1000);
+    return false;
+  }
+  if (n == 0) {
+    Serial.println("No networks found");
+    return false;
+  }
 
-    WiFi.mode(WIFI_STA);
-    while (!connectToWiFi()) {
-        Serial.println("Retrying Wi-Fi...");
-        delay(2000);
+  for (int i = 0; i < knownNetworkCount; i++) {
+    for (int j = 0; j < n; j++) {
+      if (WiFi.SSID(j) == knownNetworks[i].ssid) {
+        Serial.printf("Connecting to SSID: %s\n", knownNetworks[i].ssid);
+        // WiFi.config(static_ip, gateway, subnet);
+        WiFi.begin(knownNetworks[i].ssid, knownNetworks[i].password);
+        unsigned long start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+          delay(200);
+          Serial.print(".");
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+          Serial.printf("\nConnected to Wi-Fi: %s, IP: %s\n", knownNetworks[i].ssid, WiFi.localIP().toString().c_str());
+          currentNetwork = &knownNetworks[i];
+          return true;
+        } else {
+          Serial.println("\nWi-Fi connection timeout");
+        }
+      }
+    }
+  }
+  Serial.println("No known networks found or failed to connect.");
+  return false;
+}
+
+// TCP sync
+bool connectToTCPServer() {
+  Serial.printf("Connecting to TCP server at %s:%d...\n",
+                currentNetwork->server_ip.toString().c_str(),
+                currentNetwork->tcp_port);
+  bool result = tcpClient.connect(currentNetwork->server_ip, currentNetwork->tcp_port, 10000);
+  if (result)
+    Serial.println("Connected to TCP server.");
+  else
+    Serial.println("Failed to connect to TCP server.");
+  return result;
+}
+
+bool waitForStartCommand() {
+  Serial.println("Waiting for CMD:START:<delay> command...");
+  String msg;
+  unsigned long start = millis();
+  while (millis() - start < 15000) {
+    while (tcpClient.available()) {
+      char c = tcpClient.read();
+      msg += c;
+      if (msg.endsWith("\n")) {
+        Serial.printf("Received message: %s", msg.c_str());
+        if (msg.startsWith("CMD:START:")) {
+          int delayMs = msg.substring(10).toInt();
+          Serial.printf("Start command received, delaying %d ms\n", delayMs);
+          delay(delayMs);
+          return true;
+        }
+        msg = "";
+      }
+    }
+  }
+  Serial.println("Timeout waiting for start command.");
+  return false;
+}
+
+// ------------------- Upload ------------------- //
+void uploadToServer() {
+  Serial.println("Uploading to server...");
+  String url = "http://" + currentNetwork->server_ip.toString() + ":5000/upload";
+
+  const int maxRetries = 3;
+  int attempt = 0;
+  int httpCode = -1;
+
+  while (attempt < maxRetries) {
+    Serial.printf("Upload attempt %d...\n", attempt + 1);
+    
+    if (!http.begin(httpClient, url)) {
+      Serial.println("Failed to initiate HTTP client.");
+      http.end();
+      attempt++;
+      delay(2000);
+      continue;
     }
 
-    setupADXL345();
+    http.setTimeout(10000);  // Set a 10-second timeout for HTTP connection
+    http.addHeader("Content-Type", "application/octet-stream");
+    http.addHeader("Content-Length", String(writeIndex * SAMPLE_SIZE));
+    http.addHeader("Connection", "close");
+
+    httpCode = http.sendRequest("POST", dataBuffer, writeIndex * SAMPLE_SIZE);
+    http.end();
+
+    if (httpCode > 0) {
+      Serial.printf("Upload successful, HTTP status: %d\n", httpCode);
+      break;
+    } else {
+      Serial.printf("Upload failed, HTTP error: %d. Retrying...\n", httpCode);
+      attempt++;
+      delay(3000);  // Wait before retrying
+    }
+  }
+
+  if (httpCode <= 0) {
+    Serial.println("Upload failed after multiple attempts. Aborting.");
+    // Optionally, you can store the buffer or trigger a reset here.
+  }
 }
+
+
+// ------------------- Setup & Loop ------------------- //
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("Setup started");
+
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);
+  SPI.begin(14, 12, 13, 15);  // SCK, MISO, MOSI, CS
+
+  setupADXL345();
+  Serial.println("ADXL345 setup done");
+
+  dataBuffer = (uint8_t*)ps_malloc(TARGET_SAMPLES * SAMPLE_SIZE);
+  if (!dataBuffer) {
+    Serial.println("Failed to allocate PSRAM buffer");
+    while (true);
+  }
+
+  Serial.println("PSRAM allocated");
+
+  // Clean up any previous timer if it exists
+  if (timer != nullptr) {
+    timerStop(timer);
+    timerDetachInterrupt(timer); // Detach the interrupt
+    timerEnd(timer);         // Deinitialize the timer
+    timer = nullptr;
+    delay(50);               // Increased delay to ensure hardware settles
+  }
+
+  timer = timerBegin(2000000); // 2 MHz -> 1 tick = 0.5 µs
+  timerAttachInterrupt(timer, &onSampleTimer);
+  Serial.println("Setup complete");
+}
+
 
 void loop() {
-    if (!client.connected()) {
-        startSignalReceived = false;
-        dataCollected = false;
-        sampleCount = 0;
-        segmentCount = 0;
-        totalSamplesSent = 0;
-        startMicrosGlobal = 0; // Reset global timestamp
-        while (!connectToServer()) {
-            Serial.println("Retrying server...");
-            delay(2000);
-        }
-        if (!waitForStartSignal()) {
-            client.stop();
-            return;
-        }
+  static bool isIdle = true; // Track idle state to prevent reconnection during sampling
+
+  if (WiFi.status() != WL_CONNECTED || currentNetwork == nullptr) {
+    Serial.println("Wi-Fi disconnected or uninitialized, attempting to reconnect...");
+    while (!connectToWiFi()) {
+      delay(2000);
     }
+    isIdle = true; // Reset to idle after Wi-Fi reconnect
+  }
 
-    if (!startSignalReceived) return;
-
-    if (!dataCollected) {
-        Serial.print("Segment ");
-        Serial.print(segmentCount + 1);
-        Serial.println(" start (timestamps global from CMD:START)");
-        Serial.print("Free heap before collection: ");
-        Serial.println(ESP.getFreeHeap());
-        unsigned long startMicros = micros(); // For segment duration only
-        if (segmentCount == 0) {
-            startMicrosGlobal = startMicros; // Set global timestamp at first segment
-        }
-        unsigned long previousMicros = startMicros;
-        const unsigned long intervalMicros = 312; // Calibrated for 3200 Hz
-        sampleCount = 0;
-        int targetSamples = (segmentCount == TOTAL_SEGMENTS - 1) ? FINAL_SEGMENT_SAMPLES : SAMPLES_PER_SEGMENT;
-
-        while (sampleCount < targetSamples) {
-            unsigned long current = micros();
-            // Alternate between 312 and 313 to approximate 312.5us
-            unsigned long effectiveInterval = (sampleCount % 2 == 0) ? 312 : 313;
-            if (current - previousMicros >= effectiveInterval) {
-                previousMicros = current;
-                int offset = sampleCount * SAMPLE_SIZE;
-                readAllData(0x32, &buffer[offset], 6);
-                unsigned long timestamp = current - startMicrosGlobal; // Global timestamp
-                memcpy(&buffer[offset + 6], &timestamp, 4);
-                sampleCount++;
-            }
-        }
-        dataCollected = true;
-        unsigned long durationMicros = micros() - startMicros;
-        Serial.print("Collected ");
-        Serial.print(sampleCount);
-        Serial.println(" samples");
-        Serial.print("Segment duration (ms): ");
-        Serial.println(durationMicros / 1000.0);
-        Serial.print("Sampling rate (Hz): ");
-        Serial.println(sampleCount * 1000000.0 / durationMicros);
-        Serial.print("Free heap after collection: ");
-        Serial.println(ESP.getFreeHeap());
+  // Only attempt TCP connection if idle (not sampling and buffer empty)
+  if (isIdle && !tcpClient.connected() && !samplingDone && writeIndex == 0) {
+    while (!connectToTCPServer()) {
+      delay(1000);
     }
-
-    if (dataCollected && client.connected()) {
-        Serial.print("Connection status: ");
-        Serial.println(client.connected() ? "Connected" : "Disconnected");
-        int sentSamples = 0;
-        while (sentSamples < sampleCount) {
-            int batchSamples = min(BATCH_SIZE, sampleCount - sentSamples);
-            int bytesToSend = batchSamples * SAMPLE_SIZE;
-            int offset = sentSamples * SAMPLE_SIZE;
-            // Serial.print("Sending batch of ");
-            // Serial.print(batchSamples);
-            // Serial.println(" samples");
-            if (client.write(&buffer[offset], bytesToSend) != bytesToSend) {
-                Serial.println("Failed to send batch");
-                client.stop();
-                break;
-            }
-            sentSamples += batchSamples;
-            delay(10);
-        }
-        if (sentSamples == sampleCount) {
-            Serial.println("Segment sent");
-            totalSamplesSent += sampleCount;
-            segmentCount++;
-            sampleCount = 0;
-            dataCollected = false;
-            Serial.print("Segment ");
-            Serial.print(segmentCount);
-            Serial.print("/39, Total samples sent: ");
-            Serial.println(totalSamplesSent);
-            if (segmentCount >= TOTAL_SEGMENTS) {
-                Serial.println("All segments sent, stopping");
-                Serial.print("Final total samples: ");
-                Serial.println(totalSamplesSent);
-                client.stop();
-                startSignalReceived = false;
-                totalSamplesSent = 0;
-                segmentCount = 0;
-                startMicrosGlobal = 0; // Reset global timestamp
-            }
-        }
+    if (waitForStartCommand()) {
+      tcpClient.stop(); // Close TCP connection after receiving command
+      Serial.println("TCP connection closed, starting sampling...");
+      isIdle = false; // Enter sampling state
+      startSampling();
+    } else {
+      tcpClient.stop();
+      isIdle = true;
+      return;
     }
+  }
+
+  if (samplingDone) {
+    Serial.println("Sampling complete, disconnecting and uploading...");
+    uploadToServer();
+
+    portENTER_CRITICAL(&timerMux);
+    writeIndex = 0;
+    samplingDone = false;
+    portEXIT_CRITICAL(&timerMux);
+    
+    isIdle = true; // Return to idle state
+    Serial.println("Ready for next command...");
+  }
 }
-// unsigned long previousMicros = 0;
-// const unsigned long intervalMicros = 312;  // ~3205 Hz
-// unsigned long startMicros = 0;
-
-// void loop() {
-//   // Reconnect to server if not connected
-//   if (!client.connected()) {
-//     startSignalReceived = false;
-//     Serial.println("Client disconnected. Attempting server reconnection...");
-
-//     while (!connectToServer()) {
-//       Serial.println("Retrying server...");
-//       delay(2000);
-//       yield();
-//     }
-
-//     waitForStartSignal();
-//     startMicros = micros();
-//     previousMicros = startMicros;
-//     sampleCount = 0;
-//   }
-
-//   if (!startSignalReceived) return;
-
-//   unsigned long now = micros();
-
-//   if (startMicros == 0) {
-//     startMicros = now;
-//     previousMicros = now;
-//   }
-
-//   if ((now - startMicros) >= RUN_DURATION * 1000000UL) {
-//     if (sampleCount > 0) {
-//       client.write(buffer, sampleCount * SAMPLE_SIZE);
-//     }
-//     client.stop();  // Disconnect without reset
-//     startSignalReceived = false;
-//     sampleCount = 0;
-//     return;
-//   }
-
-//   if ((now - previousMicros) >= intervalMicros) {
-//     previousMicros += intervalMicros;
-//     int offset = sampleCount * SAMPLE_SIZE;
-//     readAllData(0x32, &buffer[offset], 6);
-//     unsigned long timestamp = now - startMicros;
-//     memcpy(&buffer[offset + 6], &timestamp, 4);
-//     sampleCount++;
-
-//     if (sampleCount >= SAMPLE_BATCH_SIZE) {
-//       client.write(buffer, SAMPLE_BATCH_SIZE * SAMPLE_SIZE);
-//       sampleCount = 0;
-//     }
-//   }
-
-//   yield();
-// }
